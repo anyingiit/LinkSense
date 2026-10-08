@@ -11,6 +11,59 @@ import {
 
 describe("LinkSense application", () => {
   setupApplicationTests()
+  it("finishes a slow language save after the settings selector closes", async () => {
+    let finish!: () => void
+    const languagePatchStart = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    const { requests } = installApiMock({ languagePatchStart })
+    renderApp("/settings/general")
+    await screen.findByRole("heading", { name: /^常规$/u })
+    await chooseSelectOption(userEvent.setup(), "界面语言", "English")
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("option", { name: "English" })
+      ).not.toBeInTheDocument()
+    )
+    expect(screen.getByRole("combobox", { name: "界面语言" })).toBeDisabled()
+    await act(async () => {
+      finish()
+      await languagePatchStart
+    })
+    await waitFor(() => expect(document.documentElement.lang).toBe("en-US"))
+    expect(window.localStorage.getItem("linksense.language")).toBe("en-US")
+    expect(requests).toContainEqual(
+      expect.objectContaining({
+        path: "/api/v1/me",
+        method: "PATCH",
+        body: { preferred_locale: "en-US" },
+      })
+    )
+  })
+  it("reflects language changes from another entry point and can switch back", async () => {
+    const { requests } = installApiMock()
+    renderApp("/settings/general")
+    await screen.findByRole("heading", { name: /^常规$/u })
+    await act(async () => {
+      await i18n.changeLanguage("en-US")
+    })
+    expect(
+      screen.getByRole("combobox", { name: "Interface language" })
+    ).toHaveTextContent("English")
+    await chooseSelectOption(
+      userEvent.setup(),
+      "Interface language",
+      "简体中文"
+    )
+    await waitFor(() => expect(document.documentElement.lang).toBe("zh-CN"))
+    expect(requests).toContainEqual(
+      expect.objectContaining({
+        path: "/api/v1/me",
+        method: "PATCH",
+        body: { preferred_locale: "zh-CN" },
+      })
+    )
+  })
   it("returns from settings to the currently open task", async () => {
     installApiMock()
     const interaction = userEvent.setup()
@@ -52,7 +105,7 @@ describe("LinkSense application", () => {
     ).toBeVisible()
   })
 
-  it("opens a compact account menu with only LinkSense account actions", async () => {
+  it("opens a compact account menu without a language selection shortcut", async () => {
     installApiMock({
       userOverride: {
         weekly_credit_limit: "0.001",
@@ -77,7 +130,11 @@ describe("LinkSense application", () => {
     await interaction.click(trigger)
 
     const menu = await screen.findByRole("menu")
-    expect(menu).toHaveClass("w-[calc(var(--anchor-width)+2.25rem)]")
+    expect(
+      within(menu).queryByRole("menuitem", { name: "界面语言" })
+    ).not.toBeInTheDocument()
+    expect(within(menu).queryByRole("menuitemradio")).not.toBeInTheDocument()
+    expect(menu).toHaveClass("w-(--anchor-width)")
     expect(menu).not.toHaveClass("w-[260px]")
     expect(within(menu).getAllByText("林晓").length).toBeGreaterThan(0)
     expect(within(menu).getByText("额度")).toBeVisible()
@@ -186,8 +243,16 @@ describe("LinkSense application", () => {
     )
     const mobileNavigation = screen.getByRole("button", { name: /设置导航/ })
     await interaction.click(mobileNavigation)
+    const mobileDrawer = await screen.findByRole("dialog", {
+      name: "LinkSense 设置导航",
+    })
+    expect(mobileDrawer).toHaveAttribute("data-side", "left")
+    expect(
+      within(mobileDrawer).getByRole("textbox", { name: "搜索设置" })
+    ).toBeVisible()
     expect(mobileNavigation).toHaveAttribute("aria-expanded", "true")
     await interaction.keyboard("{Escape}")
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
     expect(mobileNavigation).toHaveAttribute("aria-expanded", "false")
 
     const runningAction = screen.getByRole("combobox", {
@@ -209,6 +274,8 @@ describe("LinkSense application", () => {
     expect(runningAction).toHaveTextContent("引导当前执行")
 
     const languageSelector = screen.getByRole("combobox", { name: "界面语言" })
+    expect(languageSelector).toHaveClass("rounded-md")
+    expect(languageSelector).not.toHaveClass("rounded-lg", "rounded-full")
     expect(screen.queryByText("语言", { exact: true })).not.toBeInTheDocument()
     expect(languageSelector).toHaveAccessibleDescription("应用UI语言")
     expect(
@@ -300,6 +367,9 @@ describe("LinkSense application", () => {
     await interaction.click(editNameButton)
     expect(screen.getByRole("dialog", { name: "编辑名称" })).toBeInTheDocument()
     const nameInput = screen.getByRole("textbox", { name: "名称" })
+    const nameLabel = document.querySelector('label[for="profile-name"]')
+    expect(nameLabel?.lastElementChild).toHaveTextContent("*")
+    expect(nameLabel?.lastElementChild).toHaveClass("text-destructive")
     await interaction.clear(nameInput)
     await interaction.type(nameInput, "林晓新")
     await interaction.click(screen.getByRole("button", { name: "保存" }))
@@ -360,9 +430,16 @@ describe("LinkSense application", () => {
         .getByRole("heading", { name: "已关联的第三方账号" })
         .closest('[data-slot="card"]')
     ).toBeNull()
-    const currentPassword = screen.getByLabelText("当前密码")
-    const newPassword = screen.getByLabelText("新密码")
-    const confirmation = screen.getByLabelText("确认新密码")
+    const currentPassword = screen.getByLabelText(/^当前密码\s*\*?$/u)
+    const newPassword = screen.getByLabelText(/^新密码\s*\*?$/u)
+    const confirmation = screen.getByLabelText(/^确认新密码\s*\*?$/u)
+    for (const input of [currentPassword, newPassword, confirmation]) {
+      const label = document.querySelector(`label[for="${input.id}"]`)
+      expect(label?.lastElementChild).toHaveTextContent("*")
+      expect(label?.lastElementChild).toHaveClass("text-destructive")
+      expect(label?.lastElementChild).toHaveAttribute("aria-hidden", "true")
+      expect(input).toBeRequired()
+    }
     await interaction.type(currentPassword, "CurrentPass1!")
     await interaction.type(newPassword, "NextPass2!")
     await interaction.type(confirmation, "NextPass2!")

@@ -1343,8 +1343,10 @@ describe("LinkSense application", () => {
             running_turn: null,
           },
         }),
-      conversationPatchResponse: async (_conversationId, body) =>
-        json({
+      conversationPatchResponse: async (_conversationId, body) => {
+        if (body.completion_read)
+          targetConversation.has_unread_completion = false
+        return json({
           success: true,
           data: {
             ...targetConversation,
@@ -1352,7 +1354,8 @@ describe("LinkSense application", () => {
               ? false
               : targetConversation.has_unread_completion,
           },
-        }),
+        })
+      },
       automationCompletionNotification: {
         latest_unread: {
           conversation_id: targetConversation.id,
@@ -1387,11 +1390,9 @@ describe("LinkSense application", () => {
           (request) =>
             request.path ===
               "/api/v1/automations/completion-notifications/read" &&
-            request.method === "POST" &&
-            JSON.stringify(request.body) ===
-              JSON.stringify({ through: completedAt })
+            request.method === "POST"
         )
-      ).toBe(true)
+      ).toBe(false)
       expect(
         requests.some(
           (request) =>
@@ -1610,19 +1611,6 @@ describe("LinkSense application", () => {
     expect(automationLink).toHaveAttribute("href", "/automations")
     expect(pluginLink).toHaveAttribute("href", "/capabilities")
     expect(knowledgeBaseLink).toHaveAttribute("href", "/knowledge-bases")
-    await interaction.click(
-      within(sidebar).getByRole("button", { name: "反馈与帮助" })
-    )
-    expect(await screen.findByRole("menuitem", { name: "反馈" })).toBeVisible()
-    const helpCenterLink = await screen.findByRole("menuitem", {
-      name: "在新标签页打开帮助中心",
-    })
-    expect(helpCenterLink).toHaveAttribute(
-      "href",
-      "/help/user-guide/tasks/create-and-run/"
-    )
-    expect(helpCenterLink).toHaveAttribute("target", "_blank")
-    expect(helpCenterLink).toHaveAttribute("rel", "noreferrer noopener")
     expect(
       newTaskLink.compareDocumentPosition(automationLink) &
         Node.DOCUMENT_POSITION_FOLLOWING
@@ -1679,7 +1667,7 @@ describe("LinkSense application", () => {
       name: "设置",
     })
     expect(screen.getByRole("menu")).toHaveClass(
-      "w-[calc(var(--anchor-width)+2.25rem)]",
+      "w-(--anchor-width)",
       "max-w-[calc(100vw-24px)]"
     )
     expect(settingsMenuItem).toHaveClass(

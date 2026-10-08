@@ -19,7 +19,9 @@ import { ThemeProvider } from "@/app/theme-context"
 import { notify } from "@/components/feedback/notification"
 import { NotificationCenter } from "@/components/feedback/notification-toast"
 import { knowledgeBaseQueryKeys } from "@/features/knowledge-bases/knowledge-base-api"
-import i18n from "@/i18n"
+import { KnowledgeUploadSessionProvider } from "@/features/knowledge-bases/knowledge-upload-session-provider"
+import type { KnowledgeSearchCapability } from "@/features/knowledge-bases/knowledge-base-contracts"
+import i18n, { supportedLanguages } from "@/i18n"
 import {
   KnowledgeBaseDetailPage,
   KnowledgeBaseListPage,
@@ -157,14 +159,16 @@ function renderDetailPage() {
     <ThemeProvider>
       <MemoryRouter initialEntries={[`/knowledge-bases/${knowledgeBaseId}`]}>
         <QueryClientProvider client={queryClient}>
-          <Routes>
-            <Route
-              path="/knowledge-bases/:knowledgeBaseId"
-              element={<KnowledgeBaseDetailPage />}
-            />
-            <Route path="/knowledge-bases" element={<div>知识库列表</div>} />
-            <Route path="/capabilities" element={<div>应用中心</div>} />
-          </Routes>
+          <KnowledgeUploadSessionProvider>
+            <Routes>
+              <Route
+                path="/knowledge-bases/:knowledgeBaseId"
+                element={<KnowledgeBaseDetailPage />}
+              />
+              <Route path="/knowledge-bases" element={<div>知识库列表</div>} />
+              <Route path="/capabilities" element={<div>应用中心</div>} />
+            </Routes>
+          </KnowledgeUploadSessionProvider>
         </QueryClientProvider>
       </MemoryRouter>
       <NotificationCenter />
@@ -216,6 +220,9 @@ function createFetchMock(options: {
   flatEntries?: unknown[]
   source?: ReturnType<typeof sourceFixture>
   sharePointEnabled?: boolean
+  searchCapability?: KnowledgeSearchCapability
+  searchCapabilityError?: boolean
+  knowledgeBaseListUnavailable?: boolean
   creationCapability?: {
     status: "ready" | "unready" | "not_installed"
     checks: null | {
@@ -242,12 +249,22 @@ function createFetchMock(options: {
       url.pathname === "/api/v1/knowledge-bases/search-capability" &&
       method === "GET"
     ) {
+      if (options.searchCapabilityError) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ success: false, error_code: "INTERNAL_ERROR" }),
+            { status: 500, headers: { "content-type": "application/json" } }
+          )
+        )
+      }
       return Promise.resolve(
-        envelope({
-          status: "available",
-          reason_code: null,
-          checked_at: "2026-07-22T01:00:00.000Z",
-        })
+        envelope(
+          options.searchCapability ?? {
+            status: "available",
+            reason_code: null,
+            checked_at: "2026-07-22T01:00:00.000Z",
+          }
+        )
       )
     }
     if (
@@ -283,6 +300,18 @@ function createFetchMock(options: {
       )
     }
     if (url.pathname === "/api/v1/knowledge-bases" && method === "GET") {
+      if (options.knowledgeBaseListUnavailable) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              message: "Route GET:/api/v1/knowledge-bases not found",
+              error: "Not Found",
+              statusCode: 404,
+            }),
+            { status: 404, headers: { "content-type": "application/json" } }
+          )
+        )
+      }
       return Promise.resolve(
         envelope({ items: knowledgeBases, next_cursor: null })
       )
@@ -529,6 +558,130 @@ describe("knowledge-base document and access management", () => {
     cleanup()
     setAccessToken(null)
     vi.unstubAllGlobals()
+  })
+
+  it.each(supportedLanguages)(
+    "shows the uninstalled knowledge state without unsupported requests or a false API error in %s",
+    async (language) => {
+      await i18n.changeLanguage(language)
+      const fetchMock = createFetchMock({
+        searchCapability: {
+          status: "not_installed",
+          reason_code: "KNOWLEDGE_NOT_INSTALLED",
+          checked_at: "2026-07-22T01:00:00.000Z",
+        },
+        creationCapability: {
+          status: "not_installed",
+          checks: null,
+          checked_at: "2026-07-22T01:00:00.000Z",
+        },
+        knowledgeBaseListUnavailable: true,
+      })
+      vi.stubGlobal("fetch", fetchMock)
+      renderListPage(adminUser)
+
+      expect(
+        await screen.findByText(
+          i18n.t("knowledge.searchCapability.notInstalledTitle")
+        )
+      ).toBeVisible()
+      expect(
+        screen.queryByText(i18n.t("errors.invalidResponse"))
+      ).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole("button", { name: i18n.t("common.retry") })
+      ).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole("button", {
+          name: i18n.t("knowledge.create.action"),
+        })
+      ).not.toBeInTheDocument()
+      expect(
+        fetchMock.mock.calls.some(
+          ([input]) =>
+            new URL(String(input), window.location.origin).pathname ===
+            "/api/v1/knowledge-bases"
+        )
+      ).toBe(false)
+    }
+  )
+
+  it("waits for the installed capability before reading the knowledge list", async () => {
+    let resolveCapability: ((response: Response) => void) | undefined
+    const capabilityResponse = new Promise<Response>((resolve) => {
+      resolveCapability = resolve
+    })
+    const knowledgeFetch = createFetchMock({})
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input), window.location.origin).pathname
+      return path === "/api/v1/knowledge-bases/search-capability"
+        ? capabilityResponse
+        : knowledgeFetch(input, init)
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    renderListPage(adminUser)
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    expect(
+      knowledgeFetch.mock.calls.some(
+        ([input]) =>
+          new URL(String(input), window.location.origin).pathname ===
+          "/api/v1/knowledge-bases"
+      )
+    ).toBe(false)
+    expect(screen.getByText(i18n.t("common.pageLoading"))).toBeVisible()
+
+    await act(async () => {
+      resolveCapability?.(
+        envelope({
+          status: "available",
+          reason_code: null,
+          checked_at: "2026-07-22T01:00:00.000Z",
+        })
+      )
+    })
+    expect(await screen.findByRole("link", { name: "产品制度" })).toBeVisible()
+  })
+
+  it("retries a failed capability check before requesting knowledge data", async () => {
+    const options = { searchCapabilityError: true }
+    const fetchMock = createFetchMock(options)
+    vi.stubGlobal("fetch", fetchMock)
+    renderListPage(adminUser)
+
+    expect(await screen.findByText(i18n.t("errors.unknown"))).toBeVisible()
+    expect(
+      fetchMock.mock.calls.some(
+        ([input]) =>
+          new URL(String(input), window.location.origin).pathname ===
+          "/api/v1/knowledge-bases"
+      )
+    ).toBe(false)
+
+    options.searchCapabilityError = false
+    await userEvent.click(
+      screen.getByRole("button", { name: i18n.t("common.retry") })
+    )
+    expect(await screen.findByRole("link", { name: "产品制度" })).toBeVisible()
+  })
+
+  it("keeps existing knowledge readable when search is temporarily unavailable", async () => {
+    vi.stubGlobal(
+      "fetch",
+      createFetchMock({
+        searchCapability: {
+          status: "unavailable",
+          reason_code: "KNOWLEDGE_SEARCH_UNAVAILABLE",
+          checked_at: "2026-07-22T01:00:00.000Z",
+        },
+      })
+    )
+    renderListPage(adminUser)
+
+    expect(await screen.findByRole("link", { name: "产品制度" })).toBeVisible()
+    expect(
+      screen.getByText(i18n.t("knowledge.searchCapability.unavailableTitle"))
+    ).toBeVisible()
   })
 
   it.each(["zh-CN", "en-US"])(
@@ -1189,6 +1342,35 @@ describe("knowledge-base document and access management", () => {
     expect(screen.queryByText("所有者：周宁（我）")).not.toBeInTheDocument()
   })
 
+  it("marks a knowledge base name as required while leaving its description optional on edit", async () => {
+    vi.stubGlobal("fetch", createFetchMock({}))
+    renderDetailPage()
+    await userEvent.click(
+      await screen.findByRole("button", { name: i18n.t("common.edit") })
+    )
+    const dialog = await screen.findByRole("dialog", {
+      name: i18n.t("knowledge.edit.title"),
+    })
+    expect(
+      document.querySelector(
+        "label[for='knowledge-base-edit-name'] span.text-destructive[aria-hidden='true']"
+      )
+    ).toHaveTextContent("*")
+    expect(
+      document.querySelector(
+        "label[for='knowledge-base-edit-description'] span.text-destructive"
+      )
+    ).not.toBeInTheDocument()
+    const name = within(dialog).getByRole("textbox", {
+      name: i18n.t("knowledge.create.name"),
+    })
+    expect(name).toHaveAttribute("aria-required", "true")
+    fireEvent.change(name, { target: { value: "" } })
+    expect(
+      within(dialog).getByRole("button", { name: i18n.t("common.save") })
+    ).toBeDisabled()
+  })
+
   it("selects the knowledge source with cards and preserves the SharePoint create payload", async () => {
     const interaction = userEvent.setup()
     const fetchMock = createFetchMock({})
@@ -1205,6 +1387,16 @@ describe("knowledge-base document and access management", () => {
     const sourceGroup = within(dialog).getByRole("group", {
       name: "数据来源",
     })
+    expect(
+      document.querySelector(
+        "label[for='knowledge-base-name'] span.text-destructive[aria-hidden='true']"
+      )
+    ).toHaveTextContent("*")
+    expect(
+      document.querySelector(
+        "label[for='knowledge-base-description'] span.text-destructive"
+      )
+    ).not.toBeInTheDocument()
     const localSource = within(sourceGroup).getByRole("button", {
       name: /本地上传/,
     })
@@ -1223,6 +1415,11 @@ describe("knowledge-base document and access management", () => {
     await waitFor(() => expect(sharePointSource).toBeEnabled())
 
     await interaction.click(sharePointSource)
+    expect(
+      document.querySelector(
+        "label[for='knowledge-base-sharepoint-url'] span.text-destructive[aria-hidden='true']"
+      )
+    ).toHaveTextContent("*")
 
     expect(sharePointSource).toHaveAttribute("aria-pressed", "true")
     expect(localSource).toHaveAttribute("aria-pressed", "false")
@@ -1231,11 +1428,11 @@ describe("knowledge-base document and access management", () => {
     )
 
     await interaction.type(
-      within(dialog).getByLabelText("知识库名称"),
+      within(dialog).getByLabelText(/^知识库名称\s*\*?$/),
       "SharePoint 政策库"
     )
     await interaction.type(
-      within(dialog).getByLabelText("SharePoint 目录 URL"),
+      within(dialog).getByLabelText(/^SharePoint 目录 URL\s*\*?$/),
       "https://contoso.sharepoint.com/:f:/s/policy/share-token"
     )
     await interaction.click(
@@ -1263,6 +1460,65 @@ describe("knowledge-base document and access management", () => {
       })
     })
   })
+
+  it.each(
+    supportedLanguages.flatMap((language) =>
+      [true, false].map((sharePointEnabled) => ({
+        language,
+        sharePointEnabled,
+      }))
+    )
+  )(
+    "uses an equal-height responsive source grid in $language when SharePoint enabled=$sharePointEnabled",
+    async ({ language, sharePointEnabled }) => {
+      await i18n.changeLanguage(language)
+      const interaction = userEvent.setup()
+      vi.stubGlobal("fetch", createFetchMock({ sharePointEnabled }))
+      renderListPage(adminUser)
+
+      const createButton = await screen.findByRole("button", {
+        name: i18n.t("knowledge.create.action"),
+      })
+      await waitFor(() => expect(createButton).toBeEnabled())
+      await interaction.click(createButton)
+
+      const dialog = screen.getByRole("dialog", {
+        name: i18n.t("knowledge.create.title"),
+      })
+      const sourceGroup = within(dialog).getByRole("group", {
+        name: i18n.t("knowledge.create.sourceType"),
+      })
+      const sharePointSource = within(sourceGroup).getByRole("button", {
+        name: (name) =>
+          name.includes(i18n.t("knowledge.create.sourceSharePoint")),
+      })
+
+      if (sharePointEnabled) {
+        await waitFor(() => expect(sharePointSource).toBeEnabled())
+      } else {
+        expect(
+          await within(sharePointSource).findByText(
+            i18n.t("knowledge.create.sourceUnavailable")
+          )
+        ).toBeVisible()
+        expect(sharePointSource).toBeDisabled()
+      }
+
+      expect(sourceGroup).toHaveClass(
+        "grid",
+        "grid-cols-1",
+        "sm:grid-cols-2",
+        "auto-rows-fr",
+        "items-stretch"
+      )
+      expect(sourceGroup).not.toHaveClass("items-center")
+      const sourceCards = within(sourceGroup).getAllByRole("button")
+      expect(sourceCards).toHaveLength(2)
+      for (const sourceCard of sourceCards) {
+        expect(sourceCard).toHaveClass("h-auto", "min-h-24", "items-start")
+      }
+    }
+  )
 
   it("keeps the SharePoint source card unavailable when the source is not enabled", async () => {
     const interaction = userEvent.setup()
@@ -1630,6 +1886,11 @@ describe("knowledge-base document and access management", () => {
       )
       const dialog = await screen.findByRole("dialog", { name: "重命名文档" })
       const input = within(dialog).getByRole("textbox", { name: "文档名称" })
+      expect(
+        document.querySelector(
+          "label[for='knowledge-document-display-name'] span.text-destructive[aria-hidden='true']"
+        )
+      ).toHaveTextContent("*")
       fireEvent.change(input, { target: { value: "新方案.pdf" } })
       fireEvent.keyDown(input, { key: "Enter", ...keyboardEvent })
       await act(async () => {})

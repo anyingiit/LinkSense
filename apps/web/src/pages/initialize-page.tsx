@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { passwordSchema } from "@/lib/password"
+import { LanguageSwitcher } from "@/features/onboarding/language-switcher"
 
 type InitializationField =
   "credential" | "name" | "email" | "password" | "confirmation"
@@ -63,10 +64,15 @@ export function InitializePage() {
         skipRefresh: true,
       }),
     onSuccess: async () => {
+      await queryClient.cancelQueries({
+        queryKey: ["system", "bootstrap"],
+        exact: true,
+      })
       await queryClient.fetchQuery({
         queryKey: ["system", "bootstrap"],
-        queryFn: () =>
-          apiRequest("/system/bootstrap", { schema: bootstrapSchema }),
+        staleTime: 0,
+        queryFn: ({ signal }) =>
+          apiRequest("/system/bootstrap", { schema: bootstrapSchema, signal }),
       })
       navigate("/login", { replace: true, state: { initialized: true } })
     },
@@ -118,6 +124,9 @@ export function InitializePage() {
 
   return (
     <div className="public-shell flex flex-col">
+      <div className="flex shrink-0 justify-end">
+        <LanguageSwitcher />
+      </div>
       <main className="public-panel public-panel-wide shrink-0">
         <ProductLogo productName={productName} className="public-brand-logo" />
         <header>
@@ -129,6 +138,7 @@ export function InitializePage() {
           {bootstrap?.initialization_credential_required && (
             <FieldShell
               id="initialization-credential"
+              required
               label={t("initialize.credential")}
               hint={t("initialize.credentialHint")}
               error={fieldErrors.credential}
@@ -156,6 +166,7 @@ export function InitializePage() {
           )}
           <FieldShell
             id="admin-name"
+            required
             label={t("initialize.adminName")}
             error={fieldErrors.name}
           >
@@ -179,6 +190,7 @@ export function InitializePage() {
           </FieldShell>
           <FieldShell
             id="admin-email"
+            required
             label={t("common.email")}
             error={fieldErrors.email}
           >
@@ -205,6 +217,7 @@ export function InitializePage() {
           </FieldShell>
           <FieldShell
             id="admin-password"
+            required
             label={t("auth.newPassword")}
             hint={t("auth.passwordPolicy")}
             error={fieldErrors.password}
@@ -229,6 +242,7 @@ export function InitializePage() {
           </FieldShell>
           <FieldShell
             id="admin-password-confirm"
+            required
             label={t("auth.confirmPassword")}
             error={fieldErrors.confirmation}
           >

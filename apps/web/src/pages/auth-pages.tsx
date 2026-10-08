@@ -39,6 +39,7 @@ import {
   setAppLanguage,
 } from "@/i18n"
 import { passwordSchema } from "@/lib/password"
+import { LanguageSwitcher } from "@/features/onboarding/language-switcher"
 
 const emailSchema = z.email()
 
@@ -51,6 +52,9 @@ function PublicPanel({
 }) {
   return (
     <div className="public-shell flex flex-col">
+      <div className="flex shrink-0 justify-end">
+        <LanguageSwitcher />
+      </div>
       <main className="public-panel shrink-0">{children}</main>
       {showPoweredBy && (
         <PoweredByLinkSense className="mt-auto mr-3 -mb-2.5 self-end max-md:mr-0 max-md:mb-1 max-md:self-center" />
@@ -258,6 +262,7 @@ export function LoginPage() {
       <form className="form-stack" onSubmit={submit} noValidate>
         <FieldShell
           id="login-email"
+          required
           label={t("common.email")}
           error={emailError ?? undefined}
         >
@@ -282,6 +287,7 @@ export function LoginPage() {
         </FieldShell>
         <FieldShell
           id="login-password"
+          required
           label={t("auth.password")}
           error={passwordError ?? undefined}
         >
@@ -427,6 +433,7 @@ export function RegistrationPage() {
         <form className="form-stack" onSubmit={submit} noValidate>
           <FieldShell
             id="registration-email"
+            required
             label={t("common.email")}
             error={emailError ?? undefined}
           >
@@ -556,6 +563,7 @@ export function CompleteRegistrationPage() {
       <form className="form-stack" onSubmit={submit} noValidate>
         <FieldShell
           id="registration-password"
+          required
           label={t("auth.newPassword")}
           hint={t("auth.passwordPolicy")}
           error={passwordError ?? undefined}
@@ -580,6 +588,7 @@ export function CompleteRegistrationPage() {
         </FieldShell>
         <FieldShell
           id="registration-password-confirmation"
+          required
           label={t("auth.confirmPassword")}
           error={confirmationError ?? undefined}
         >
@@ -681,6 +690,7 @@ export function ForgotPasswordPage() {
       <form className="form-stack" onSubmit={submit} noValidate>
         <FieldShell
           id="forgot-email"
+          required
           label={t("common.email")}
           error={emailError ?? undefined}
         >
@@ -797,6 +807,7 @@ export function ResetPasswordPage() {
       <form className="form-stack" onSubmit={submit} noValidate>
         <FieldShell
           id="new-password"
+          required
           label={t("auth.newPassword")}
           hint={t("auth.passwordPolicy")}
           error={passwordError ?? undefined}
@@ -820,6 +831,7 @@ export function ResetPasswordPage() {
         </FieldShell>
         <FieldShell
           id="confirm-password"
+          required
           label={t("auth.confirmPassword")}
           error={confirmationError ?? undefined}
         >

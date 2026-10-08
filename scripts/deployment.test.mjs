@@ -28,6 +28,7 @@ const assistantHtmlPreviewShellPath = resolve(
 const apiDockerfilePath = resolve("Dockerfile.api");
 const developmentDockerfilePath = resolve("Dockerfile.dev");
 const runnerDockerfilePath = resolve("Dockerfile.runner");
+const baselineDockerfilePath = resolve("deploy/baselines/Dockerfile.runtime");
 const runnerRuntimeSmokePath = resolve(
   "deploy/docker/runner-runtime-smoke.mjs",
 );
@@ -789,20 +790,17 @@ test("production Git deployment is serialized, migration-gated, force-stopped, a
   assert.match(script, /worker_source_fingerprint\(\)/u);
   assert.match(script, /worker_runtime_changed_paths\(\)/u);
   assert.match(script, /worker_rebuild_changed_paths\(\)/u);
-  assert.match(script, /worker_browser_runtime_changed_paths\(\)/u);
+  assert.match(script, /deploy\/baselines\/images\.lock\.json/u);
   assert.match(script, /git ls-tree -r "\$target_revision"/u);
   assert.match(script, /git diff --name-only "\$worker_runtime_base" "\$target_revision"/u);
   assert.match(script, /git diff --name-only "\$worker_rebuild_base" "\$target_revision"/u);
-  assert.match(script, /git diff --name-only "\$worker_browser_runtime_base" "\$target_revision"/u);
+
   assert.match(script, /cannot reuse the previous worker image because worker runtime inputs changed/u);
   assert.match(script, /docker tag "\$previous_worker_image" "\$worker_image"/u);
   assert.match(script, /Worker image inputs changed since the last successful deployment; rebuilding/u);
   assert.match(script, /Worker image inputs did not change since \$\{deployed_revision\}; keeping \$\{worker_image\}/u);
   assert.match(script, /Existing worker image is missing its fingerprint label; rebuilding/u);
-  assert.match(script, /worker_build_target="worker-cached-browser"/u);
-  assert.match(script, /Reusing browser runtime from \$\{browser_runtime_cache_image\}/u);
-  assert.match(script, /LINKSENSE_WORKER_BUILD_TARGET/u);
-  assert.match(script, /LINKSENSE_BROWSER_RUNTIME_CACHE_IMAGE/u);
+  assert.doesNotMatch(script, /worker-cached-browser|LINKSENSE_BROWSER_RUNTIME_CACHE_IMAGE|LINKSENSE_WORKER_BUILD_TARGET/u);
   assert.match(script, /build_services="migrate api runner web"/u);
   assert.match(script, /Reusing worker image \$\{worker_image\}/u);
   assert.match(script, /capture_previous_image_ids/u);
@@ -1281,8 +1279,6 @@ test("Docker builds configure a fast Debian mirror with bounded network retries"
     );
   for (const dockerfile of [
     developmentDockerfile,
-    apiDockerfile,
-    runnerDockerfile,
   ]) {
     const configureIndex = dockerfile.indexOf(
       "deploy/docker/configure-debian-apt.sh",
@@ -1294,6 +1290,16 @@ test("Docker builds configure a fast Debian mirror with bounded network retries"
     assert.match(dockerfile, /ARG DEBIAN_MIRROR_URL=/u);
     assert.match(dockerfile, /ARG DEBIAN_SECURITY_MIRROR_URL=/u);
   }
+  for (const dockerfile of [await readFile(baselineDockerfilePath, "utf8")]) {
+    assert.match(dockerfile, /deploy\/docker\/bootstrap-ubuntu-node\.sh/u);
+    assert.match(dockerfile, /ARG UBUNTU_MIRROR_URL/u);
+    assert.match(dockerfile, /ARG UBUNTU_SECURITY_MIRROR_URL/u);
+    assert.match(dockerfile, /FROM \$\{UBUNTU_IMAGE\} AS node-runtime/u);
+  }
+  const ubuntuBootstrap = await readFile(new URL("../deploy/docker/bootstrap-ubuntu-node.sh", import.meta.url), "utf8");
+  assert.match(ubuntuBootstrap, /Acquire::Retries "3"/u);
+  assert.match(ubuntuBootstrap, /Acquire::http::Timeout "30"/u);
+  assert.match(ubuntuBootstrap, /Acquire::https::Timeout "30"/u);
 
   const installIndex = developmentDockerfile.indexOf(
     "pnpm install --frozen-lockfile",
@@ -1308,29 +1314,12 @@ test("Docker builds configure a fast Debian mirror with bounded network retries"
     runnerDockerfile,
     /ARG WORKER_IMAGE_FINGERPRINT=unversioned.*LABEL com\.linksense\.worker\.fingerprint=\$\{WORKER_IMAGE_FINGERPRINT\}/su,
   );
-  assert.match(
-    runnerDockerfile,
-    /ARG LINKSENSE_BROWSER_RUNTIME_CACHE_IMAGE=linksense-runner-worker:pro-latest[\s\S]*FROM \$\{LINKSENSE_BROWSER_RUNTIME_CACHE_IMAGE\} AS browser-runtime-cache/u,
-  );
-  assert.match(
-    runnerDockerfile,
-    /FROM worker-browser-build-input AS worker/u,
-  );
-  assert.match(
-    runnerDockerfile,
-    /FROM worker-browser-cache-input AS worker-cached-browser/u,
-  );
-  assert.match(
-    runnerDockerfile,
-    /FROM worker-base AS worker-browser-build-input[\s\S]*COPY --from=browser-runtime-build \/opt\/linksense\/runtime\/browser/u,
-  );
-  assert.match(
-    runnerDockerfile,
-    /FROM worker-base AS worker-browser-cache-input[\s\S]*COPY --from=browser-runtime-cache \/opt\/linksense\/runtime\/browser/u,
-  );
+  assert.match(runnerDockerfile, /FROM \$\{BASELINE_WORKER_IMAGE\} AS worker/u);
+  assert.doesNotMatch(runnerDockerfile, /worker-cached-browser|browser-runtime-cache|install-browser/u);
+  assert.doesNotMatch(apiDockerfile, /apt-get/u);
 });
 
-test("Compose exposes overridable Debian build mirrors", async () => {
+test("development exposes Debian build mirrors while production inherits maintained runtime baselines", async () => {
   const [compose, developmentCompose, example] = await Promise.all([
     readFile(composePath, "utf8"),
     readFile(developmentComposePath, "utf8"),
@@ -1344,7 +1333,7 @@ test("Compose exposes overridable Debian build mirrors", async () => {
 
   for (const [name, value] of Object.entries(mirrors)) {
     assert.match(example, new RegExp(`^${name}=${value}$`, "mu"));
-    assert.ok(compose.includes(`\${${name}:-${value}}`));
+    assert.ok(!compose.includes(`\${${name}:-${value}}`));
     assert.ok(developmentCompose.includes(`\${${name}:-${value}}`));
   }
 });
@@ -1456,6 +1445,7 @@ test("Docker dependency installs consistently use the official Node package regi
     readFile(resolve("pnpm-lock.yaml"), "utf8"),
   ]);
 
+  const runtime = await readFile(baselineDockerfilePath, "utf8");
   for (const dockerfile of [
     developmentDockerfile,
     apiDockerfile,
@@ -1466,23 +1456,21 @@ test("Docker dependency installs consistently use the official Node package regi
       dockerfile,
       /ARG LINKSENSE_NODE_PACKAGE_REGISTRY_URL=https:\/\/registry\.npmjs\.org\//u,
     );
-    assert.match(
-      dockerfile,
-      /corepack_registry="\$\{LINKSENSE_NODE_PACKAGE_REGISTRY_URL%\/\}"/u,
-    );
+    const tooling = dockerfile === developmentDockerfile ? dockerfile : runtime;
+    assert.match(tooling, /corepack_registry="\$\{LINKSENSE_NODE_PACKAGE_REGISTRY_URL%\/\}"/u);
     assert.match(
       dockerfile,
       /ENV NPM_CONFIG_REGISTRY=\$\{LINKSENSE_NODE_PACKAGE_REGISTRY_URL\}/u,
     );
     assert.match(dockerfile, /ENV COREPACK_HOME=\/pnpm\/corepack/u);
     assert.match(
-      dockerfile,
+      tooling,
       /COREPACK_NPM_REGISTRY="\$\{corepack_registry\}" corepack prepare/u,
     );
   }
 
   assert.match(
-    runnerDockerfile,
+    runtime,
     /cp -a "\$\{COREPACK_HOME\}\/v1\/pnpm\/\$\{PNPM_VERSION\}\/\." \/opt\/linksense\/tooling\/pnpm\//u,
   );
   assert.doesNotMatch(runnerDockerfile, /\/root\/\.cache\/node\/corepack/u);
@@ -1506,65 +1494,44 @@ test("Docker dependency installs consistently use the official Node package regi
   assert.doesNotMatch(lockfile, /registry\.npmmirror\.com/u);
 
   assert.match(
-    runnerDockerfile,
+    runtime,
     /^ARG PLAYWRIGHT_DOWNLOAD_HOST=$/mu,
   );
   assert.match(
-    runnerDockerfile,
+    runtime,
     /^ENV PLAYWRIGHT_DOWNLOAD_HOST=\$\{PLAYWRIGHT_DOWNLOAD_HOST\}$/mu,
   );
   assert.match(
     environmentExample,
     /^PLAYWRIGHT_DOWNLOAD_HOST=$/mu,
   );
-  assert.ok(
-    compose.includes(
-      "PLAYWRIGHT_DOWNLOAD_HOST: ${PLAYWRIGHT_DOWNLOAD_HOST:-}",
-    ),
-  );
+  assert.doesNotMatch(compose, /PLAYWRIGHT_DOWNLOAD_HOST:/u);
   const pythonPackageIndexUrl = "https://pypi.org/simple/";
-  assert.match(runnerDockerfile, /^ARG UV_VERSION=0\.9\.13$/mu);
+  assert.match(runtime, /^ARG UV_VERSION=0\.9\.13$/mu);
   assert.match(
-    runnerDockerfile,
+    runtime,
     new RegExp(
       `^ARG LINKSENSE_PYTHON_PACKAGE_INDEX_URL=${pythonPackageIndexUrl}$`,
       "mu",
     ),
   );
   assert.match(
-    runnerDockerfile,
+    runtime,
     /ENV PIP_INDEX_URL=\$\{LINKSENSE_PYTHON_PACKAGE_INDEX_URL\}/u,
   );
   assert.match(
-    runnerDockerfile,
+    runtime,
     /python -m pip install --no-cache-dir "uv==\$\{UV_VERSION\}"/u,
   );
-  assert.doesNotMatch(runnerDockerfile, /ghcr\.io\/astral-sh\/uv/u);
+  assert.match(runtime, /FROM ghcr\.io\/astral-sh\/uv:\$\{UV_VERSION\}/u);
   assert.doesNotMatch(runnerDockerfile, /AS uv-bin/u);
   assert.match(
     environmentExample,
     new RegExp(`^LINKSENSE_PYTHON_PACKAGE_INDEX_URL=${pythonPackageIndexUrl}$`, "mu"),
   );
-  assert.ok(
-    compose.includes(
-      `LINKSENSE_PYTHON_PACKAGE_INDEX_URL: \${LINKSENSE_PYTHON_PACKAGE_INDEX_URL:-${pythonPackageIndexUrl}}`,
-    ),
-  );
-  assert.match(environmentExample, /^LINKSENSE_WORKER_BUILD_TARGET=worker$/mu);
-  assert.match(
-    environmentExample,
-    /^LINKSENSE_BROWSER_RUNTIME_CACHE_IMAGE=linksense-runner-worker:pro-latest$/mu,
-  );
-  assert.ok(
-    compose.includes(
-      "target: ${LINKSENSE_WORKER_BUILD_TARGET:-worker}",
-    ),
-  );
-  assert.ok(
-    compose.includes(
-      "LINKSENSE_BROWSER_RUNTIME_CACHE_IMAGE: ${LINKSENSE_BROWSER_RUNTIME_CACHE_IMAGE:-linksense-runner-worker:pro-latest}",
-    ),
-  );
+  assert.doesNotMatch(compose, /LINKSENSE_BROWSER_RUNTIME_CACHE_IMAGE|LINKSENSE_WORKER_BUILD_TARGET/u);
+  assert.doesNotMatch(section(compose, "  runner-worker-image:", "  runner:"), /LINKSENSE_PYTHON_PACKAGE_INDEX_URL:/u);
+  assert.doesNotMatch(environmentExample, /LINKSENSE_BROWSER_RUNTIME_CACHE_IMAGE|LINKSENSE_WORKER_BUILD_TARGET/u);
 });
 
 test("Prisma generation uses the configured engine mirror during Docker builds", async () => {
@@ -1612,14 +1579,11 @@ test("Prisma generation uses the configured engine mirror during Docker builds",
 test("API image provides OpenSSL before Prisma client generation", async () => {
   const dockerfile = await readFile(apiDockerfilePath, "utf8");
 
-  const opensslIndex = dockerfile.indexOf(
-    "apt-get install --yes --no-install-recommends ca-certificates openssl",
-  );
-  const prismaGenerateIndex = dockerfile.indexOf("pnpm db:generate");
-
-  assert.notEqual(opensslIndex, -1);
-  assert.notEqual(prismaGenerateIndex, -1);
-  assert.ok(opensslIndex < prismaGenerateIndex);
+  const baseline = await readFile(baselineDockerfilePath, "utf8");
+  const bootstrap = await readFile(resolve("deploy/docker/bootstrap-ubuntu-node.sh"), "utf8");
+  assert.match(bootstrap, /apt-get install --yes --no-install-recommends ca-certificates curl openssl/u);
+  assert.match(baseline, /FROM \$\{UBUNTU_IMAGE\} AS node-runtime[\s\S]*bootstrap-ubuntu-node/u);
+  assert.match(dockerfile, /FROM \$\{BASELINE_NODE_IMAGE\} AS toolchain[\s\S]*pnpm db:generate/u);
 });
 
 test("Codex template requires the isolated Responses provider and disables native MCP elicitation", async () => {
@@ -1688,7 +1652,7 @@ test("Codex authentication is managed at runtime rather than in deployment env",
 test("Codex installation and its adapter share a repository pin with no deployment override", async () => {
   const [dockerfile, compose, environmentExample, protocol, deployment, release] = await Promise.all(
     [
-      readFile(runnerDockerfilePath, "utf8"),
+      readFile(baselineDockerfilePath, "utf8"),
       readFile(composePath, "utf8"),
       readFile(environmentExamplePath, "utf8"),
       readFile(runnerCodexProtocolPath, "utf8"),
@@ -1705,13 +1669,15 @@ test("Codex installation and its adapter share a repository pin with no deployme
   assert.match(workerBase, /RUN install -d -o root -g root -m 0755 \/opt\/linksense\nCOPY --chmod=0444 apps\/runner\/src\/codex\/runtime-version\.json/u);
   assert.match(protocol, /import runtimeVersion from "\.\/runtime-version\.json" with \{ type: "json" \}/u);
   assert.doesNotMatch(protocol, /CODEX_SCHEMA_VERSION\s*=\s*["']/u);
-  for (const target of ["worker", "worker-cached-browser"]) {
+  for (const target of ["worker"]) {
     const stage = section(dockerfile, ` AS ${target}\n`, "\nFROM ");
     assert.match(stage, /require\("\/opt\/linksense\/codex-runtime-version\.json"\)/u);
     assert.match(stage, /pnpm add --global "@openai\/codex@\$\{codex_version\}"/u);
     assert.match(stage, /test "\$\{installed_codex_version\}" = "codex-cli \$\{codex_version\}"/u);
   }
-  assert.match(release, /await assertCodexRuntimeVersion\(\{ command: 'codex' \}\)/u);
+  assert.match(release, /node scripts\/worker-isolation-smoke\.mjs "\$image"/u);
+  const workerIsolation = await readFile(resolve("deploy/docker/worker-isolation-smoke.mjs"), "utf8");
+  assert.match(workerIsolation, /await assertCodexRuntimeVersion\(\{ command: "codex", processIdentity: identity \}\)/u);
 });
 
 test("production worker reuse follows the committed Codex pin and ignores old environment versions", async () => {
@@ -1765,6 +1731,15 @@ worker_rebuild_changed_paths "$2"
   }
 });
 
+test("the packaged isolation proof invalidates every source-deployment Worker reuse path", async () => {
+  const deployment = await readFile(productionDeployPath, "utf8");
+  for (const name of ["worker_source_fingerprint", "worker_runtime_changed_paths", "worker_rebuild_changed_paths"]) {
+    assert.ok(extractShellFunction(deployment, name).includes("deploy/docker/worker-isolation-smoke.mjs"));
+  }
+  const dockerfile = await readFile(runnerDockerfilePath, "utf8");
+  assert.match(dockerfile, /COPY --chown=root:root --chmod=0444 deploy\/docker\/worker-isolation-smoke\.mjs \/opt\/linksense\/worker-isolation-smoke\.mjs/u);
+});
+
 test("native plugin refresh smoke projects the current managed capability layout", async () => {
   const smoke = await readFile(
     resolve("scripts/codex-native-plugin-refresh-smoke.mts"),
@@ -1810,14 +1785,15 @@ test("runner image separates the trusted controller from unprivileged task worke
   const build = section(
     dockerfile,
     "FROM dependencies AS build",
-    "FROM ${PYTHON_IMAGE} AS python-runtime-build",
+    "# The controller is trusted infrastructure.",
   );
   const controller = section(
     dockerfile,
-    "FROM ${NODE_IMAGE} AS controller",
-    "FROM ${NODE_IMAGE} AS worker",
+    "FROM ${BASELINE_NODE_IMAGE} AS controller",
+    "FROM ${BASELINE_WORKER_IMAGE} AS worker",
   );
-  const worker = section(dockerfile, "FROM ${NODE_IMAGE} AS worker");
+  const baseline = await readFile(baselineDockerfilePath, "utf8");
+  const worker = baseline + "\n" + section(dockerfile, "FROM ${BASELINE_WORKER_IMAGE} AS worker");
 
   assert.match(controller, /^USER root$/mu);
   assert.doesNotMatch(controller, /pnpm add --global|uv sync|runtime\/python/u);
@@ -1860,7 +1836,7 @@ test("runner image separates the trusted controller from unprivileged task worke
 
 test("API images embed the pinned localhost-only LibreOffice conversion runtime", async () => {
   const [apiDockerfile, developmentDockerfile] = await Promise.all([
-    readFile(apiDockerfilePath, "utf8"),
+    readFile(baselineDockerfilePath, "utf8"),
     readFile(developmentDockerfilePath, "utf8"),
   ]);
 
@@ -1933,7 +1909,7 @@ test("the worker image owns the static Codex template without a template volume"
 test("shared Python and Node runtimes are lockfile-driven and smoke tested", async () => {
   const [dockerfile, pythonProject, pythonLock, nodeProjectText, nodeLock] =
     await Promise.all([
-      readFile(runnerDockerfilePath, "utf8"),
+      readFile(baselineDockerfilePath, "utf8"),
       readFile(pythonRuntimeProjectPath, "utf8"),
       readFile(pythonRuntimeLockPath, "utf8"),
       readFile(nodeRuntimeProjectPath, "utf8"),
@@ -1982,7 +1958,7 @@ test("shared Python and Node runtimes are lockfile-driven and smoke tested", asy
     assert.match(pythonLock, new RegExp(`name = "${packageName}"`, "u"));
   }
   assert.deepEqual(Object.keys(nodeProject.dependencies).sort(), nodePackages);
-  assert.equal(nodeProject.packageManager, "pnpm@10.6.4");
+  assert.equal(nodeProject.packageManager, "pnpm@10.34.6");
   for (const packageName of nodePackages) {
     assert.match(nodeLock, new RegExp(`      ${packageName}:`, "u"));
   }
@@ -2030,14 +2006,14 @@ test("worker enables only the managed Plan output Stop hook", async () => {
     dockerfile.match(
       /deploy\/codex-system\/requirements\.toml \/etc\/codex\/requirements\.toml/gu,
     )?.length,
-    2,
+    1,
   );
   assert.match(
-    dockerfile,
+    await readFile(baselineDockerfilePath, "utf8"),
     /COPY --chmod=0644 deploy\/runtime\/node\/register-hooks\.mjs deploy\/runtime\/node\/plan-stop-hook\.mjs deploy\/runtime\/node\/smoke\.mjs \.\//u,
   );
   assert.match(
-    dockerfile,
+    await readFile(baselineDockerfilePath, "utf8"),
     /COPY --chmod=0644 deploy\/runtime\/node\/user-package\.json \.\/user-package\.json/u,
   );
   assert.match(hook, /LINKSENSE_COLLABORATION_MODE === PLAN_MODE/u);
@@ -2065,13 +2041,14 @@ test("worker full Chromium capability is pinned, broad by default, Plan-read-onl
     readFile(codexConfigPath, "utf8"),
     readFile(runnerIndexPath, "utf8"),
   ]);
+  const baseline = await readFile(baselineDockerfilePath, "utf8");
   const browserProject = JSON.parse(browserProjectText);
   const browserStage = section(
-    dockerfile,
+    baseline,
     "FROM toolchain AS browser-runtime-build",
-    "# The controller is trusted infrastructure.",
+    "FROM node-runtime AS node",
   );
-  const workerStage = section(dockerfile, "FROM ${NODE_IMAGE} AS worker", null);
+  const workerStage = baseline + "\n" + section(dockerfile, "FROM ${BASELINE_WORKER_IMAGE} AS worker", null);
 
   assert.equal(browserProject.dependencies["@playwright/cli"], "0.1.17");
   assert.match(browserLock, /'@playwright\/cli@0\.1\.17'/u);
@@ -2081,8 +2058,8 @@ test("worker full Chromium capability is pinned, broad by default, Plan-read-onl
     /playwright-cli install-browser chromium;/u,
   );
   assert.equal(
-    dockerfile.match(/install-browser chromium/gu)?.length,
-    6,
+    baseline.match(/install-browser chromium/gu)?.length,
+    4,
   );
   assert.doesNotMatch(
     dockerfile,
@@ -2113,7 +2090,7 @@ test("worker full Chromium capability is pinned, broad by default, Plan-read-onl
   assert.match(browserInitPage, /route\.close\(\{/u);
   assert.match(browserCliWrapper, /acceptDownloads: !input\.readOnly/u);
   assert.match(browserCliWrapper, /userAgent: await readBrowserUserAgent\(input\.runtimeRoot\)/u);
-  for (const stageName of ["worker", "worker-cached-browser"]) {
+  for (const stageName of ["worker"]) {
     const stage = dockerfile.split(/(?=^FROM )/mu).find((value) => value.split("\n")[0].endsWith(` AS ${stageName}`));
     assert.ok(stage, `missing ${stageName} stage`);
     assert.ok(stage.includes('user_home="/tmp/browser-smoke/home"'));
@@ -2131,7 +2108,7 @@ test("worker full Chromium capability is pinned, broad by default, Plan-read-onl
   );
   assert.match(
     workerStage,
-    /CMD \["\/usr\/bin\/setpriv", "--reuid=1000", "--regid=1000", "--keep-groups", "--inh-caps=\+setuid,\+kill,\+dac_override,\+fowner,\+chown", "--ambient-caps=\+setuid,\+kill,\+dac_override,\+fowner,\+chown", "node", "dist\/index\.js"\]/u,
+    /CMD \["\/usr\/bin\/setpriv", "--reuid=1000", "--regid=1000", "--keep-groups", "--inh-caps=\+setuid,\+kill,\+dac_override,\+fowner,\+chown,\+setpcap", "--ambient-caps=\+setuid,\+kill,\+dac_override,\+fowner,\+chown,\+setpcap", "node", "dist\/index\.js"\]/u,
   );
   assert.match(
     workerStage,
@@ -2173,7 +2150,8 @@ test("worker shell bootstrap restores managed PATH after a login profile", async
     readFile(runnerDockerfilePath, "utf8"),
     readFile(bashEnvironmentBootstrapPath, "utf8"),
   ]);
-  const workerStage = section(dockerfile, "FROM ${NODE_IMAGE} AS worker", null);
+  const baseline = await readFile(baselineDockerfilePath, "utf8");
+  const workerStage = baseline + "\n" + section(dockerfile, "FROM ${BASELINE_WORKER_IMAGE} AS worker", null);
   const managedPath = bootstrap.match(/^PATH=(.+)$/mu)?.[1];
   assert.ok(managedPath);
 
@@ -2250,19 +2228,19 @@ test("worker images expose the protected plugin STDIO launcher", async () => {
     dockerfile.match(
       /COPY --chmod=0755 deploy\/runtime\/node\/linksense-plugin-stdio \/opt\/linksense\/bin\/linksense-plugin-stdio/gu,
     )?.length,
-    2,
+    1,
   );
   assert.equal(
     dockerfile.match(
       /ln -s \/opt\/linksense\/bin\/linksense-plugin-stdio \/usr\/local\/bin\/linksense-plugin-stdio/gu,
     )?.length,
-    2,
+    1,
   );
   assert.equal(
     dockerfile.match(
       /test "\$\(command -v linksense-plugin-stdio\)" = \/opt\/linksense\/bin\/linksense-plugin-stdio/gu,
     )?.length,
-    2,
+    1,
   );
   assert.match(wrapper, /^#!\/bin\/sh\nset -eu\n/u);
   assert.match(
@@ -2363,7 +2341,7 @@ test("per-user package managers serialize writes and preserve immutable fallback
     nodePnpmLauncher,
     /\/usr\/local\/bin\/node \/opt\/linksense\/tooling\/pnpm\/bin\/pnpm\.cjs/u,
   );
-  assert.equal(userNodePackage.packageManager, "pnpm@10.6.4");
+  assert.equal(userNodePackage.packageManager, "pnpm@10.34.6");
 
   const normalResolution = nodeHook.indexOf(
     "return nextResolve(specifier, context)",
@@ -2394,7 +2372,7 @@ test("Compose exposes the Docker socket only to the controller and prebuilds wor
 
   assert.match(
     workerImageService,
-    /target: \$\{LINKSENSE_WORKER_BUILD_TARGET:-worker\}/u,
+    /target: worker/u,
   );
   assert.match(workerImageService, /entrypoint: \["\/bin\/true"\]/u);
   assert.doesNotMatch(workerImageService, /docker\.sock|volumes:/u);

@@ -1,10 +1,24 @@
-import { cleanup, render, screen } from "@testing-library/react"
+import {
+  cleanup,
+  render as renderComponent,
+  screen,
+} from "@testing-library/react"
+import type { ReactElement } from "react"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import {
+  modelProviderPresets,
+  modelServiceProviderValues,
+} from "@linksense/shared"
 import type { ModelProviderSettings } from "@/api/contracts"
-import i18n from "@/i18n"
+import i18n, { supportedLanguages } from "@/i18n"
 import { ChannelEditor, ModelEditor } from "./model-channel-editors"
 import { newModel } from "./model-settings-draft"
+import {
+  expectRequiredLabel,
+  formLabelPattern,
+} from "./required-field-label.test-helper"
 
 const channel: ModelProviderSettings["providers"][number] = {
   id: "primary",
@@ -36,7 +50,324 @@ const settings: ModelProviderSettings = {
 
 afterEach(cleanup)
 
+function render(element: ReactElement) {
+  return renderComponent(
+    <QueryClientProvider
+      client={
+        new QueryClient({ defaultOptions: { mutations: { retry: false } } })
+      }
+    >
+      {element}
+    </QueryClientProvider>
+  )
+}
+
 describe("model editor conflict feedback", () => {
+  it.each(
+    supportedLanguages.flatMap((language) => [
+      { language, mode: "new", editedChannel: null },
+      { language, mode: "existing", editedChannel: channel },
+    ])
+  )(
+    "renders the provider before the channel name for a $mode channel in $language",
+    async ({ language, editedChannel }) => {
+      await i18n.changeLanguage(language)
+      render(
+        <ChannelEditor
+          channel={editedChannel}
+          settings={settings}
+          pending={false}
+          error={null}
+          onClose={vi.fn()}
+          onSave={vi.fn()}
+        />
+      )
+      const provider = screen.getByRole("combobox", {
+        name: i18n.t("admin.modelProvider.serviceProvider"),
+      })
+      const name = screen.getByRole("textbox", {
+        name: i18n.t("admin.modelProvider.providerName"),
+      })
+      const providerField = provider.closest('[data-slot="field"]')
+      const nameField = name.closest('[data-slot="field"]')
+      expect(providerField?.parentElement?.children[0]).toBe(providerField)
+      expect(providerField?.nextElementSibling).toBe(nameField)
+      expect(nameField?.nextElementSibling).toContainElement(
+        screen.getByRole("textbox", {
+          name: i18n.t("admin.modelProvider.baseUrl"),
+        })
+      )
+    }
+  )
+
+  it("marks channel credentials only when a new key is needed", async () => {
+    await i18n.changeLanguage("en-US")
+    const user = userEvent.setup()
+    render(
+      <ChannelEditor
+        channel={channel}
+        settings={settings}
+        pending={false}
+        error={null}
+        onClose={vi.fn()}
+        onSave={vi.fn()}
+      />
+    )
+    expectRequiredLabel(screen.getByRole("textbox", { name: "Channel name" }))
+    const url = screen.getByRole("textbox", { name: "Base URL" })
+    expectRequiredLabel(url)
+    const key = screen.getByLabelText(/^API_KEY\s*\*?$/)
+    expectRequiredLabel(key, false)
+    await user.clear(url)
+    await user.type(url, "https://other-models.example.test/v1")
+    expectRequiredLabel(key)
+    expectRequiredLabel(
+      screen.getByRole("combobox", { name: i18n.t("modelSetup.testModel") }),
+      false
+    )
+  })
+
+  it("marks the model identity and prices while leaving context length optional", async () => {
+    await i18n.changeLanguage("en-US")
+    render(
+      <ModelEditor
+        channel={channel}
+        initialModel={channel.models[0] ?? null}
+        settings={settings}
+        pending={false}
+        error={null}
+        onClose={vi.fn()}
+        onSave={vi.fn()}
+      />
+    )
+    expectRequiredLabel(screen.getByRole("textbox", { name: "Model ID" }))
+    expectRequiredLabel(screen.getByRole("textbox", { name: "Display name" }))
+    expectRequiredLabel(screen.getByRole("combobox", { name: "Model type" }))
+    for (const key of ["inputPrice", "cachedInputPrice", "outputPrice"]) {
+      expectRequiredLabel(
+        screen.getByRole("textbox", {
+          name: i18n.t(`admin.modelProvider.${key}`),
+        })
+      )
+    }
+    expectRequiredLabel(
+      screen.getByRole("textbox", {
+        name: i18n.t("admin.modelProvider.contextWindow"),
+      }),
+      false
+    )
+    expectRequiredLabel(
+      screen.getByRole("button", {
+        name: i18n.t("admin.modelProvider.supportedEfforts"),
+      })
+    )
+    expectRequiredLabel(
+      screen.getByRole("combobox", {
+        name: i18n.t("admin.modelProvider.defaultEffort"),
+      })
+    )
+  })
+
+  it("disables connection fields and actions while a channel is being saved", async () => {
+    await i18n.changeLanguage("en-US")
+    render(
+      <ChannelEditor
+        channel={channel}
+        settings={settings}
+        pending
+        error={null}
+        onClose={vi.fn()}
+        onSave={vi.fn()}
+      />
+    )
+    for (const label of ["Channel name", "Base URL", "API_KEY"]) {
+      expect(screen.getByLabelText(formLabelPattern(label))).toBeDisabled()
+    }
+    for (const name of ["Model provider", "Protocol compatibility mode"]) {
+      expect(screen.getByRole("combobox", { name })).toBeDisabled()
+    }
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled()
+    expect(
+      screen.getByRole("button", { name: "Save model channel Primary" })
+    ).toBeDisabled()
+  })
+
+  it.each(supportedLanguages)(
+    "keeps connection fields visible and editable after switching providers in %s",
+    async (language) => {
+      await i18n.changeLanguage(language)
+      const user = userEvent.setup()
+      const onSave = vi.fn()
+      render(
+        <ChannelEditor
+          channel={null}
+          settings={settings}
+          pending={false}
+          error={null}
+          onClose={vi.fn()}
+          onSave={onSave}
+        />
+      )
+      const name = screen.getByLabelText(
+        formLabelPattern(i18n.t("admin.modelProvider.providerName"))
+      )
+      const url = screen.getByLabelText(
+        formLabelPattern(i18n.t("admin.modelProvider.baseUrl"))
+      )
+      const key = screen.getByLabelText(
+        formLabelPattern(i18n.t("admin.modelProvider.apiKey"))
+      )
+      expectRequiredLabel(name)
+      expectRequiredLabel(url)
+      expectRequiredLabel(key)
+      await user.type(name, "New channel")
+      await user.type(key, "test-key")
+
+      for (const provider of modelServiceProviderValues) {
+        await user.click(
+          screen.getByRole("combobox", {
+            name: i18n.t("admin.modelProvider.serviceProvider"),
+          })
+        )
+        await user.click(
+          await screen.findByRole("option", {
+            name: i18n.t(`admin.imageUnderstanding.providers.${provider}`),
+          })
+        )
+        expect(name).toBeVisible()
+        expect(name).toHaveValue("New channel")
+        expect(url).toBeVisible()
+        expect(url).toHaveValue(modelProviderPresets[provider].base_url ?? "")
+        expect(key).toBeVisible()
+        expect(key).toHaveValue("test-key")
+        if (provider === "google_vertex") {
+          expectRequiredLabel(
+            screen.getByRole("textbox", {
+              name: i18n.t("admin.imageUnderstanding.project"),
+            })
+          )
+          expectRequiredLabel(
+            screen.getByRole("textbox", {
+              name: i18n.t("admin.imageUnderstanding.location"),
+            })
+          )
+        }
+        expect(
+          screen.getByRole("combobox", {
+            name: i18n.t("admin.modelProvider.serviceProvider"),
+          })
+        ).toBeVisible()
+        expect(
+          screen.getByRole("combobox", {
+            name: i18n.t("admin.modelProvider.protocolMode"),
+          })
+        ).toHaveTextContent(
+          i18n.t(
+            `admin.modelProvider.protocolModes.${modelProviderPresets[provider].protocol_mode}`
+          )
+        )
+      }
+
+      await user.type(name, " edited")
+      await user.type(url, "https://models.example.test/v1")
+      await user.type(key, "-edited")
+      expect(name).toHaveValue("New channel edited")
+      expect(url).toHaveValue("https://models.example.test/v1")
+      expect(key).toHaveValue("test-key-edited")
+      await user.click(
+        screen.getByRole("button", {
+          name: i18n.t("admin.modelProvider.saveProvider", {
+            name: "New channel edited",
+          }),
+        })
+      )
+      expect(onSave).toHaveBeenCalledOnce()
+      expect(onSave).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providers: expect.arrayContaining([
+            expect.objectContaining({
+              name: "New channel edited",
+              provider: "openai_compatible",
+              base_url: "https://models.example.test/v1",
+              api_key: "test-key-edited",
+              protocol_mode:
+                modelProviderPresets.openai_compatible.protocol_mode,
+            }),
+          ]),
+        })
+      )
+    }
+  )
+
+  it("suggests OpenAI connection settings only after the user selects that provider", async () => {
+    await i18n.changeLanguage("en-US")
+    const user = userEvent.setup()
+    render(
+      <ChannelEditor
+        channel={null}
+        settings={settings}
+        pending={false}
+        error={null}
+        onClose={vi.fn()}
+        onSave={vi.fn()}
+      />
+    )
+    expect(screen.getByLabelText(formLabelPattern("Base URL"))).toHaveValue("")
+    expect(
+      screen.getByRole("combobox", { name: "Protocol compatibility mode" })
+    ).toBeVisible()
+    expect(
+      screen.queryByRole("button", { name: "Advanced settings" })
+    ).not.toBeInTheDocument()
+    await user.click(screen.getByRole("combobox", { name: "Model provider" }))
+    await user.click(await screen.findByRole("option", { name: "OpenAI" }))
+    expect(screen.getByLabelText(formLabelPattern("Base URL"))).toHaveValue(
+      "https://api.openai.com/v1"
+    )
+  })
+
+  it("preserves a saved provider's custom URL and protocol when opening the editor", async () => {
+    await i18n.changeLanguage("en-US")
+    const user = userEvent.setup()
+    const onSave = vi.fn()
+    render(
+      <ChannelEditor
+        channel={{
+          ...channel,
+          provider: "openai",
+          protocol_mode: "responses_tool_compat",
+        }}
+        settings={settings}
+        pending={false}
+        error={null}
+        onClose={vi.fn()}
+        onSave={onSave}
+      />
+    )
+    expect(screen.getByLabelText(formLabelPattern("Base URL"))).toHaveValue(
+      channel.base_url
+    )
+    expect(
+      screen.getByRole("combobox", { name: "Protocol compatibility mode" })
+    ).toHaveTextContent(
+      i18n.t("admin.modelProvider.protocolModes.responses_tool_compat")
+    )
+    await user.click(
+      screen.getByRole("button", { name: "Save model channel Primary" })
+    )
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providers: expect.arrayContaining([
+          expect.objectContaining({
+            id: channel.id,
+            base_url: channel.base_url,
+            protocol_mode: "responses_tool_compat",
+          }),
+        ]),
+      })
+    )
+  })
+
   it.each(["zh-CN", "en-US", "de-DE"])(
     "warns about same-channel and cross-channel model display names while allowing save in %s",
     async (language) => {
@@ -54,12 +385,17 @@ describe("model editor conflict feedback", () => {
           onSave={onSave}
         />
       )
+      await user.click(
+        screen.getByRole("button", { name: i18n.t("modelSetup.manual") })
+      )
       await user.type(
-        screen.getByLabelText(language === "en-US" ? "Model ID" : "模型 ID"),
+        screen.getByLabelText(
+          formLabelPattern(language === "en-US" ? "Model ID" : "模型 ID")
+        ),
         "model-c"
       )
       const name = screen.getByLabelText(
-        language === "en-US" ? "Display name" : "显示名称"
+        formLabelPattern(language === "en-US" ? "Display name" : "显示名称")
       )
       const message =
         language === "en-US"
@@ -114,10 +450,13 @@ describe("model editor conflict feedback", () => {
         onSave={vi.fn()}
       />
     )
-    const name = screen.getByLabelText("Display name")
+    const name = screen.getByLabelText(formLabelPattern("Display name"))
     expect(name).not.toHaveAttribute("aria-describedby")
-    await user.clear(screen.getByLabelText("Model ID"))
-    await user.type(screen.getByLabelText("Model ID"), "renamed-id")
+    await user.clear(screen.getByLabelText(formLabelPattern("Model ID")))
+    await user.type(
+      screen.getByLabelText(formLabelPattern("Model ID")),
+      "renamed-id"
+    )
     expect(name).not.toHaveAttribute("aria-describedby")
     await user.clear(name)
     await user.type(name, "Model B")
@@ -149,7 +488,7 @@ describe("model editor conflict feedback", () => {
         />
       )
       const name = screen.getByLabelText(
-        language === "en-US" ? "Channel name" : "渠道名称"
+        formLabelPattern(language === "en-US" ? "Channel name" : "渠道名称")
       )
       await user.type(name, " Primary ")
       expect(name).toHaveAccessibleDescription(
@@ -169,10 +508,13 @@ describe("model editor conflict feedback", () => {
         "dark:border-destructive/50"
       )
       await user.type(
-        screen.getByLabelText("Base URL"),
+        screen.getByLabelText(formLabelPattern("Base URL")),
         "https://models.example.test/v1"
       )
-      await user.type(screen.getByLabelText("API_KEY"), "test-key")
+      await user.type(
+        screen.getByLabelText(formLabelPattern("API_KEY")),
+        "test-key"
+      )
       const save = screen.getByRole("button", {
         name:
           language === "en-US"
@@ -203,7 +545,7 @@ describe("model editor conflict feedback", () => {
         onSave={vi.fn()}
       />
     )
-    const name = screen.getByLabelText("Channel name")
+    const name = screen.getByLabelText(formLabelPattern("Channel name"))
     expect(name).not.toHaveAttribute("aria-describedby")
     await user.clear(name)
     await user.type(name, "Secondary")
@@ -232,12 +574,15 @@ describe("model editor conflict feedback", () => {
           onSave={onSave}
         />
       )
+      await user.click(
+        screen.getByRole("button", { name: i18n.t("modelSetup.manual") })
+      )
       const id = screen.getByLabelText(
-        language === "en-US" ? "Model ID" : "模型 ID"
+        formLabelPattern(language === "en-US" ? "Model ID" : "模型 ID")
       )
       await user.type(
         screen.getByLabelText(
-          language === "en-US" ? "Display name" : "显示名称"
+          formLabelPattern(language === "en-US" ? "Display name" : "显示名称")
         ),
         "New model"
       )
@@ -284,7 +629,7 @@ describe("model editor conflict feedback", () => {
         onSave={vi.fn()}
       />
     )
-    const id = screen.getByLabelText("Model ID")
+    const id = screen.getByLabelText(formLabelPattern("Model ID"))
     const save = screen.getByRole("button", { name: "Save model Model A" })
     expect(id).toHaveAttribute("aria-invalid", "false")
     expect(save).toBeEnabled()

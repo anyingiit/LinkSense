@@ -21,6 +21,7 @@ import { sourceFingerprint } from "./source-fingerprint.mjs";
 import { developmentTlsDirectory, prepareDevelopmentTls, trustDevelopmentCertificate } from "./dev-tls.mjs";
 import { assertDevelopmentHttp2 } from "./dev-http2.mjs";
 import { developmentResourceOwner, planDevelopmentImageBuilds, reportDevelopmentImageCleanup } from "./dev-images.mjs";
+import { checkBaselineAdoption } from "./baseline-adoption.mjs";
 export { developmentImageNames } from "./dev-images.mjs";
 export { sourceFingerprint } from "./source-fingerprint.mjs";
 
@@ -375,12 +376,18 @@ export function migrationImageFingerprint(rootDirectory = repositoryRoot) {
   return sourceFingerprint(rootDirectory, [
     ".dockerignore",
     "Dockerfile.api",
+    "deploy/baselines/images.lock.json",
     "LICENSE", "LICENSE-EXCEPTIONS.md", "ATTRIBUTION.md", "TRADEMARK.md", "NOTICE",
     "apps/api/package.json",
     "apps/docs/package.json",
     "apps/runner/package.json",
     "apps/web/package.json",
     "deploy/docker/configure-debian-apt.sh",
+    "deploy/docker/bootstrap-ubuntu-node.sh",
+    "deploy/migration",
+    "deploy/runtime/tooling-security",
+    "deploy/docker/patch-tooling-libraries.mjs",
+    "deploy/docker/verify-tooling-libraries.mjs",
     "package.json",
     "packages/shared/package.json",
     "patches",
@@ -394,7 +401,7 @@ export function migrationImageFingerprint(rootDirectory = repositoryRoot) {
 
 export function docsImageFingerprint(rootDirectory = repositoryRoot) {
   return sourceFingerprint(rootDirectory, [
-    ".dockerignore", "Dockerfile.web", "LICENSE", "LICENSE-EXCEPTIONS.md", "ATTRIBUTION.md", "TRADEMARK.md", "NOTICE", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "patches", "tsconfig.base.json",
+    ".dockerignore", "Dockerfile.web", "deploy/baselines/images.lock.json", "LICENSE", "LICENSE-EXCEPTIONS.md", "ATTRIBUTION.md", "TRADEMARK.md", "NOTICE", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "patches", "tsconfig.base.json",
     "apps/api/package.json", "apps/runner/package.json", "apps/web/package.json", "packages/shared/package.json",
     "apps/docs/package.json", "apps/docs/docusaurus.config.ts", "apps/docs/sidebars.ts", "apps/docs/tsconfig.json",
     "apps/docs/docs", "apps/docs/i18n", "apps/docs/src", "apps/docs/static",
@@ -406,6 +413,7 @@ export function workerImageFingerprint(rootDirectory = repositoryRoot) {
   return sourceFingerprint(rootDirectory, [
     ".dockerignore",
     "Dockerfile.runner",
+    "deploy/baselines/images.lock.json",
     "LICENSE",
     "LICENSE-EXCEPTIONS.md", "ATTRIBUTION.md", "TRADEMARK.md", "NOTICE",
     "apps/api/package.json",
@@ -418,7 +426,13 @@ export function workerImageFingerprint(rootDirectory = repositoryRoot) {
     "deploy/codex-home-template",
     "deploy/codex-system",
     "deploy/docker/configure-debian-apt.sh",
+    "deploy/docker/bootstrap-ubuntu-node.sh",
     "deploy/docker/runner-runtime-smoke.mjs",
+    "deploy/docker/worker-isolation-smoke.mjs",
+    "deploy/docker/patch-tooling-libraries.mjs",
+    "deploy/docker/verify-tooling-libraries.mjs",
+    "deploy/docker/verify-kernel-headers.mjs",
+    "deploy/runtime/tooling-security",
     "deploy/runtime/browser",
     "deploy/runtime/fonts",
     "deploy/runtime/node",
@@ -918,6 +932,7 @@ export function fingerprintBuildConfiguration(sourceHash, build) {
 }
 
 export function configuredDevelopmentFingerprints(environmentFile, environment) {
+  checkBaselineAdoption();
   const result = spawnSync("docker", developmentComposeArguments(environmentFile, ["config", "--format", "json"]), {
     cwd: repositoryRoot, env: environment, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 15_000, maxBuffer: 4 * 1024 * 1024,
   });
@@ -1274,6 +1289,7 @@ export async function main(argumentsList = process.argv.slice(2)) {
       return;
     }
     verifyRunnerEnvironmentFile();
+    checkBaselineAdoption();
     const productionEnvironment = {
       ...buildProductionParityEnvironment(process.env),
       LINKSENSE_MIGRATION_IMAGE_FINGERPRINT: migrationImageFingerprint(),

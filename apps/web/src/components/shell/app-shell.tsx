@@ -6,7 +6,11 @@ import {
   useQueryClient,
   type InfiniteData,
 } from "@tanstack/react-query"
-import { errorCatalog, type ConversationOrderGroup } from "@linksense/shared"
+import {
+  errorCatalog,
+  modelPreferenceSchema,
+  type ConversationOrderGroup,
+} from "@linksense/shared"
 import {
   BellIcon,
   BlocksIcon,
@@ -38,14 +42,13 @@ import {
   conversationOrderResultSchema,
   conversationSchema,
   paginatedSchema,
-  type AutomationCompletionNotification,
   type Conversation,
   type Paginated,
 } from "@/api/contracts"
 import { getErrorMessage } from "@/api/error-message"
 import { useAuth } from "@/app/auth-state"
 import { useProductName } from "@/app/product-branding"
-import { PoweredByLinkSense } from "@/components/brand/powered-by-linksense"
+import { PoweredByLinkSenseFooter } from "@/components/brand/powered-by-linksense"
 import { ProductLogo } from "@/components/brand/product-logo"
 import { ConfirmDialog } from "@/components/feedback/confirm-dialog"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
@@ -87,7 +90,7 @@ import { SidebarConversationActions } from "@/components/shell/sidebar-conversat
 import { SidebarTaskScrollArea } from "@/components/shell/sidebar-task-scroll-area"
 import { AppShellLayout } from "@/components/shell/app-shell-layout"
 import { conversationSettingsReturnState } from "@/components/shell/settings-return-navigation"
-import { SupportMenu } from "@/components/shell/support-menu"
+import { FeedbackDialog, SupportMenuItems } from "@/components/shell/support-menu"
 import {
   Tooltip,
   TooltipTrigger,
@@ -95,7 +98,7 @@ import {
 } from "@/components/ui/tooltip"
 import { ApplicationIconDisplay } from "@/features/applications/application-icon"
 import { defaultApplicationIcon } from "@/features/applications/application-icon-default"
-import { SystemUpdateNotice } from "@/features/admin/system-update"
+import { SystemUpdateNotice } from "@/features/admin/system-update-notice"
 import {
   useProjects,
   moveTaskToProject,
@@ -384,6 +387,20 @@ function AppSidebarContent({
   const location = useLocation()
   const queryClient = useQueryClient()
   const { user, signOut } = useAuth()
+  const isActiveAdmin = user?.role === "admin" && user.status === "active"
+  const setupModelPreferenceQuery = useQuery({
+    queryKey: ["me", "model-preference", "new"],
+    queryFn: ({ signal }) =>
+      apiRequest("/me/model-preference", {
+        schema: modelPreferenceSchema,
+        signal,
+      }),
+    enabled: isActiveAdmin,
+  })
+  const showFirstUseGuide =
+    isActiveAdmin &&
+    setupModelPreferenceQuery.isSuccess &&
+    !setupModelPreferenceQuery.data.configured
   const taskRoute = useMatch("/conversations/:conversationId")
   const applicationTaskRoute = useMatch(
     "/applications/:applicationId/run/:conversationId"
@@ -394,12 +411,13 @@ function AppSidebarContent({
       applicationTaskRoute?.params.conversationId
   )
   const [searchOpen, setSearchOpen] = useState(false)
+  const [feedbackOpen, setFeedbackOpen] = useState(false)
   const [signOutConfirmOpen, setSignOutConfirmOpen] = useState(false)
   const [signOutPending, setSignOutPending] = useState(false)
-  const [locallyReadConversationIds, setLocallyReadConversationIds] = useState(
-    () => new Set<string>()
-  )
+  const [locallyReadConversationVersions, setLocallyReadConversationVersions] =
+    useState(() => new Map<string, string>())
   const completionReadInFlightIdsRef = useRef(new Set<string>())
+  const completionReadFailureVersionsRef = useRef(new Map<string, string>())
   const projectsQuery = useProjects()
   const [projectAction, setProjectAction] = useState<ProjectAction | null>(null)
   const [renameTarget, setRenameTarget] = useState<Conversation>()
@@ -456,6 +474,19 @@ function AppSidebarContent({
   const conversations = useMemo(
     () => conversationsData?.pages.flatMap((page) => page.items) ?? [],
     [conversationsData]
+  )
+  const locallyReadConversationIds = useMemo(
+    () =>
+      new Set(
+        conversations
+          .filter(
+            (conversation) =>
+              locallyReadConversationVersions.get(conversation.id) ===
+              conversation.updated_at
+          )
+          .map((conversation) => conversation.id)
+      ),
+    [conversations, locallyReadConversationVersions]
   )
   const handleTaskSortModeChange = useCallback(
     (scope: SidebarTaskSortScope, mode: SidebarTaskSortMode) => {
@@ -554,22 +585,6 @@ function AppSidebarContent({
       setRenameTarget(undefined)
       setRenameValue("")
       await queryClient.invalidateQueries({ queryKey: ["conversations"] })
-    },
-    onError: (error) => setActionError(getErrorMessage(error, t)),
-  })
-
-  const markAutomationNotificationsReadMutation = useMutation({
-    mutationFn: (through: string) =>
-      apiRequest("/automations/completion-notifications/read", {
-        method: "POST",
-        body: { through },
-        schema: automationCompletionNotificationSchema,
-      }),
-    onSuccess: (notification) => {
-      queryClient.setQueryData<AutomationCompletionNotification>(
-        automationNotificationQueryKey,
-        notification
-      )
     },
     onError: (error) => setActionError(getErrorMessage(error, t)),
   })
@@ -713,14 +728,31 @@ function AppSidebarContent({
       }),
     onMutate: (conversation) => {
       setActionError(undefined)
-      setLocallyReadConversationIds((current) => {
-        const next = new Set(current)
-        next.add(conversation.id)
+      completionReadFailureVersionsRef.current.delete(conversation.id)
+      setLocallyReadConversationVersions((current) => {
+        const next = new Map(current)
+        next.set(conversation.id, conversation.updated_at)
         return next
       })
     },
     onSuccess: async (nextConversation) => {
       completionReadInFlightIdsRef.current.delete(nextConversation.id)
+      queryClient.setQueryData<InfiniteData<Paginated<Conversation>>>(
+        ["conversations", "sidebar"],
+        (current) => {
+          const cached = current?.pages
+            .flatMap((page) => page.items)
+            .find((item) => item.id === nextConversation.id)
+          return patchSidebarConversationExecutionStatus(
+            current,
+            nextConversation.id,
+            cached?.execution_status,
+            { hasUnreadCompletion: nextConversation.has_unread_completion }
+          )
+        }
+      )
+      // Keep the accepted version acknowledged if a list request replays its
+      // pre-PATCH snapshot. A different updated_at is not locally acknowledged.
       // PATCH returns task metadata, not a detail snapshot with an SSE cursor.
       // Seeding the detail cache here would start replay before GET completes.
       queryClient.setQueryData<Conversation>(
@@ -740,8 +772,12 @@ function AppSidebarContent({
     },
     onError: (error, conversation) => {
       completionReadInFlightIdsRef.current.delete(conversation.id)
-      setLocallyReadConversationIds((current) => {
-        const next = new Set(current)
+      completionReadFailureVersionsRef.current.set(
+        conversation.id,
+        conversation.updated_at
+      )
+      setLocallyReadConversationVersions((current) => {
+        const next = new Map(current)
         next.delete(conversation.id)
         return next
       })
@@ -750,11 +786,14 @@ function AppSidebarContent({
   })
 
   const markCompletionRead = useCallback(
-    (conversation: Conversation) => {
+    (conversation: Conversation, retry = false) => {
       if (
         !conversation.has_unread_completion ||
         locallyReadConversationIds.has(conversation.id) ||
-        completionReadInFlightIdsRef.current.has(conversation.id)
+        completionReadInFlightIdsRef.current.has(conversation.id) ||
+        (!retry &&
+          completionReadFailureVersionsRef.current.get(conversation.id) ===
+            conversation.updated_at)
       ) {
         return
       }
@@ -814,6 +853,18 @@ function AppSidebarContent({
 
   const latestAutomationNotification =
     automationNotificationsQuery.data?.latest_unread
+  const latestAutomationNotificationId =
+    latestAutomationNotification?.conversation_id
+  const latestAutomationCompletedAt = latestAutomationNotification?.completed_at
+  useEffect(() => {
+    if (!latestAutomationNotificationId || !latestAutomationCompletedAt) return
+    // A scheduled task can finish without a mounted conversation event stream.
+    // Refresh task metadata whenever polling discovers a different completion.
+    void queryClient.invalidateQueries({
+      queryKey: ["conversations", "sidebar"],
+      exact: true,
+    })
+  }, [latestAutomationNotificationId, latestAutomationCompletedAt, queryClient])
   const latestAutomationConversation = latestAutomationNotification
     ? conversations.find(
         (conversation) =>
@@ -832,12 +883,10 @@ function AppSidebarContent({
     const latestUnread = visibleAutomationNotification
     if (!latestUnread) return
 
-    if (!markAutomationNotificationsReadMutation.isPending) {
-      markAutomationNotificationsReadMutation.mutate(latestUnread.completed_at)
-    }
     const conversation = conversations.find(
       (item) => item.id === latestUnread.conversation_id
     )
+    if (conversation) markCompletionRead(conversation, true)
     navigate(
       conversation
         ? conversationPath(conversation)
@@ -1104,7 +1153,7 @@ function AppSidebarContent({
                               <NavLink
                                 to={to}
                                 onClick={() => {
-                                  markCompletionRead(conversation)
+                                  markCompletionRead(conversation, true)
                                   onNavigate?.()
                                 }}
                                 onKeyDown={(event) => {
@@ -1342,7 +1391,7 @@ function AppSidebarContent({
               side="top"
               align="start"
               sideOffset={8}
-              className="account-menu w-[calc(var(--anchor-width)+2.25rem)] max-w-[calc(100vw-24px)] border-0 p-1.5"
+              className="account-menu w-(--anchor-width) max-w-[calc(100vw-24px)] border-0 p-1.5"
             >
               <DropdownMenuGroup>
                 <DropdownMenuLabel className="account-menu-identity flex items-center gap-2.5 px-2 py-2 text-[var(--app-text)]">
@@ -1361,6 +1410,23 @@ function AppSidebarContent({
               </DropdownMenuGroup>
               <DropdownMenuSeparator />
               <DropdownMenuGroup>
+                {showFirstUseGuide && (
+                  <DropdownMenuItem
+                    render={
+                      <NavLink
+                        to="/conversations/new?setup=1"
+                        onClick={onNavigate}
+                      />
+                    }
+                    className="text-[length:var(--app-ui-font-size)]"
+                  >
+                    <MessageSquarePlusIcon
+                      className="size-3.5"
+                      aria-hidden="true"
+                    />
+                    {t("onboarding.reopen")}
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem
                   className="account-menu-quota min-h-7 justify-between gap-2 text-[length:var(--app-ui-font-size)] font-medium"
                   render={
@@ -1382,6 +1448,7 @@ function AppSidebarContent({
                     {creditQuotaRemainingLabel}
                   </span>
                 </DropdownMenuItem>
+                <SupportMenuItems onFeedback={() => setFeedbackOpen(true)} />
                 <DropdownMenuItem
                   className="text-[length:var(--app-ui-font-size)]"
                   render={
@@ -1397,18 +1464,20 @@ function AppSidebarContent({
                 </DropdownMenuItem>
               </DropdownMenuGroup>
               <DropdownMenuSeparator />
-              <DropdownMenuItem
-                className="text-[length:var(--app-ui-font-size)]"
-                onClick={() => setSignOutConfirmOpen(true)}
-              >
-                <LogOutIcon className="size-3.5" aria-hidden="true" />
-                {t("common.signOut")}
-              </DropdownMenuItem>
+              <DropdownMenuGroup>
+                <DropdownMenuItem
+                  className="text-[length:var(--app-ui-font-size)]"
+                  onClick={() => setSignOutConfirmOpen(true)}
+                >
+                  <LogOutIcon className="size-3.5" aria-hidden="true" />
+                  {t("common.signOut")}
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
             </DropdownMenuContent>
           </DropdownMenu>
-          <SupportMenu className="sidebar-help-button text-[var(--app-sidebar-muted)] hover:bg-[var(--app-sidebar-hover)] hover:text-[var(--app-text)]" />
         </div>
       </div>
+      <FeedbackDialog open={feedbackOpen} onOpenChange={setFeedbackOpen} />
       <ConversationSearchDialog
         open={searchOpen}
         onOpenChange={setSearchOpen}
@@ -1490,41 +1559,41 @@ export function AppShell() {
           onCollapse={() => setSidebarCollapsed(true)}
         />
       </aside>
-      <main
-        className="app-main"
-        data-compact-top-bar={usesCompactTopBar ? "true" : undefined}
-        id="main-content"
-      >
-        {sidebarCollapsed && (
+      <div className="flex min-h-0 min-w-0 flex-col">
+        <main
+          className="app-main min-h-0 flex-1"
+          data-compact-top-bar={usesCompactTopBar ? "true" : undefined}
+          id="main-content"
+        >
+          {sidebarCollapsed && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="desktop-sidebar-trigger sidebar-collapse-control hidden border-0 bg-transparent shadow-none md:inline-flex"
+              aria-label={t("nav.expandSidebar")}
+              aria-controls="app-sidebar"
+              aria-expanded="false"
+              onClick={() => setSidebarCollapsed(false)}
+            >
+              <PanelLeftIcon strokeWidth={2} aria-hidden="true" />
+            </Button>
+          )}
           <Button
             type="button"
             variant="ghost"
             size="icon-sm"
-            className="desktop-sidebar-trigger sidebar-collapse-control hidden border-0 bg-transparent shadow-none md:inline-flex"
-            aria-label={t("nav.expandSidebar")}
-            aria-controls="app-sidebar"
-            aria-expanded="false"
-            onClick={() => setSidebarCollapsed(false)}
+            className="mobile-shell-trigger md:hidden"
+            aria-label={t("nav.open")}
+            onClick={() => setMobileOpen(true)}
           >
-            <PanelLeftIcon strokeWidth={2} aria-hidden="true" />
+            <MenuIcon aria-hidden="true" />
           </Button>
-        )}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          className="mobile-shell-trigger md:hidden"
-          aria-label={t("nav.open")}
-          onClick={() => setMobileOpen(true)}
-        >
-          <MenuIcon aria-hidden="true" />
-        </Button>
-        <SystemUpdateNotice />
-        <Outlet />
-        {!usesCompactTopBar && (
-          <PoweredByLinkSense className="fixed right-7 bottom-[22px] z-30 max-md:right-auto max-md:bottom-3.5 max-md:left-1/2 max-md:-translate-x-1/2" />
-        )}
-      </main>
+          <SystemUpdateNotice />
+          <Outlet />
+        </main>
+        {!usesCompactTopBar && <PoweredByLinkSenseFooter />}
+      </div>
       <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
         <SheetContent
           side="left"

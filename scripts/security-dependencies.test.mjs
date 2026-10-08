@@ -13,11 +13,26 @@ const lockfile = parse(
 );
 
 // Security floors for GHSA-6mj3-qw4j-hgrw, GHSA-rgj7-g3m4-5g8c,
-// and GHSA-2x7j-588g-ccc2. Check every resolution, including transitive copies.
+// GHSA-2x7j-588g-ccc2, and the Fastify validation / not-found advisories
+// GHSA-9q9j-q6p8-xq58, GHSA-hwr6-493r-vm6h, GHSA-p68q-wchp-6fh7,
+// GHSA-v53p-9fqp-m79j, GHSA-c475-qrg2-pj4r, GHSA-qhr7-859c-m2p7,
+// GHSA-xjh9-v7x6-24jw, GHSA-qw65-cvwx-89v3, GHSA-rfgv-xxqx-mfg5,
+// GHSA-wq5f-xc86-pv6w and GHSA-6qxp-vccf-f47h.
+// Check every resolution, including transitive copies.
 for (const [name, minimum] of [
   ["@xmldom/xmldom", "0.9.12"],
-  ["sharp", "0.35.4"],
-  ["nodemailer", "9.1.0"],
+  ["sharp", "0.35.5"],
+  ["@modelcontextprotocol/sdk", "1.31.0"],
+  ["nodemailer", "10.0.6"],
+  ["fastify", "5.12.2"],
+  ["@fastify/busboy", "3.2.1"],
+  ["basic-ftp", "6.2.1"],
+  ["brace-expansion", "5.0.11"],
+  ["fast-uri", "3.1.7"],
+  ["undici", "6.28.1"],
+  ["proxy-addr", "2.0.8"],
+  ["source-map-js", "1.2.2"],
+  ["prosemirror-view", "1.42.3"],
 ]) {
   test(`the lockfile resolves ${name} only to security-patched versions`, () => {
     const versions = Object.keys(lockfile.packages)
@@ -30,14 +45,37 @@ for (const [name, minimum] of [
     for (const version of versions) {
       // The maintained 0.8.15 line carries the XML security fixes and is outside
       // GHSA-6mj3-qw4j-hgrw's affected 0.9.x range. Node-SAML requires its API.
-      const patched =
-        name === "@xmldom/xmldom"
-          ? satisfies(version, "~0.8.15 || >=0.9.12")
-          : gte(version, minimum);
+      const patchedRanges = {
+        "@xmldom/xmldom": "~0.8.15 || >=0.9.12",
+        "fast-uri": ">=3.1.7 <4.0.0 || >=4.1.4",
+        "undici": ">=6.28.1 <7.0.0 || >=7.29.1",
+      };
+      const patched = name in patchedRanges
+        ? satisfies(version, patchedRanges[name])
+        : gte(version, minimum);
       assert.ok(patched, `${name}@${version} must be security-patched`);
     }
   });
 }
+
+test("the shared Worker Node runtime also pins the patched SVG decoder", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../deploy/runtime/node/package.json", import.meta.url), "utf8"));
+  const workerLock = parse(readFileSync(new URL("../deploy/runtime/node/pnpm-lock.yaml", import.meta.url), "utf8"));
+  assert.equal(manifest.dependencies.sharp, "0.35.5");
+  const versions = Object.keys(workerLock.packages).filter(key => key.startsWith("sharp@"));
+  assert.ok(versions.length > 0);
+  for (const key of versions) assert.ok(gte(key.slice("sharp@".length), "0.35.5"));
+});
+
+test("the component generator is a build dependency rather than a production dependency", () => {
+  const manifest = JSON.parse(
+    readFileSync(new URL("../apps/web/package.json", import.meta.url), "utf8"),
+  );
+  assert.ok(manifest.devDependencies.shadcn);
+  assert.equal(manifest.dependencies.shadcn, undefined);
+  assert.ok(lockfile.importers["apps/web"].devDependencies.shadcn);
+  assert.equal(lockfile.importers["apps/web"].dependencies.shadcn, undefined);
+});
 
 test("SAML uses the patched supported XML parser without changing other consumers", () => {
   const manifest = JSON.parse(

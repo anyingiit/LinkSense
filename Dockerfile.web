@@ -1,17 +1,15 @@
 # syntax=docker/dockerfile:1.7
 
-ARG NODE_IMAGE=node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
+ARG BASELINE_NODE_IMAGE=ghcr.io/lingx-ai/linksense-runtime-node@sha256:c051d417b73027a493e25379e939807ea748532ad64ac4747d7b6bb05a02ffb4
+ARG BASELINE_WEB_IMAGE=ghcr.io/lingx-ai/linksense-runtime-web@sha256:d83f377374d134a3ee9e23f8e0160399f9e2654373cd210e753c51fc26f845d1
 ARG LINKSENSE_NODE_PACKAGE_REGISTRY_URL=https://registry.npmjs.org/
 
-FROM ${NODE_IMAGE} AS dependencies
+FROM ${BASELINE_NODE_IMAGE} AS dependencies
 ARG LINKSENSE_NODE_PACKAGE_REGISTRY_URL
 ENV PNPM_HOME=/pnpm
 ENV COREPACK_HOME=/pnpm/corepack
 ENV PATH=${PNPM_HOME}:${PATH}
 ENV NPM_CONFIG_REGISTRY=${LINKSENSE_NODE_PACKAGE_REGISTRY_URL}
-RUN corepack_registry="${LINKSENSE_NODE_PACKAGE_REGISTRY_URL%/}" \
-  && corepack enable \
-  && COREPACK_NPM_REGISTRY="${corepack_registry}" corepack prepare pnpm@10.6.4 --activate
 WORKDIR /workspace
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY patches patches
@@ -34,7 +32,7 @@ RUN NODE_OPTIONS="${DOCS_BUILD_NODE_OPTIONS}" TERSER_PARALLEL="${DOCS_BUILD_TERS
   pnpm --filter @linksense/docs build
 
 # Development serves exactly the same bilingual static build as production.
-FROM nginx:1.28-alpine AS docs-runtime
+FROM ${BASELINE_WEB_IMAGE} AS docs-runtime
 COPY --chmod=0444 LICENSE /usr/share/licenses/linksense/LICENSE
 COPY --chmod=0444 LICENSE-EXCEPTIONS.md ATTRIBUTION.md TRADEMARK.md NOTICE /usr/share/licenses/linksense/
 COPY deploy/nginx/development-docs.conf /etc/nginx/conf.d/default.conf
@@ -59,7 +57,7 @@ ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
 RUN pnpm --filter @linksense/shared build \
   && LINKSENSE_BUILD_ID="$(cat /linksense-build-id)" pnpm --filter @linksense/web build
 
-FROM nginx:1.28-alpine AS runtime
+FROM ${BASELINE_WEB_IMAGE} AS runtime
 ENV NGINX_ENVSUBST_FILTER=^NGINX_
 ENV NGINX_CLIENT_MAX_BODY_SIZE=110m
 COPY --chmod=0444 LICENSE /usr/share/licenses/linksense/LICENSE

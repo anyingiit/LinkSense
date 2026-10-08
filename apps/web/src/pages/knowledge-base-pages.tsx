@@ -178,10 +178,8 @@ import {
   createDefaultKnowledgeSourceSyncScheduleDraft,
   knowledgeSourceSyncScheduleFromDraft,
 } from "@/features/knowledge-bases/knowledge-source-schedule"
-import {
-  KnowledgeUploadBatchProgress,
-  type KnowledgeUploadBatchStatus,
-} from "@/features/knowledge-bases/knowledge-upload-batch-progress"
+import { KnowledgeUploadBatchProgress } from "@/features/knowledge-bases/knowledge-upload-batch-progress"
+import { useKnowledgeUploadBatchStatus } from "@/features/knowledge-bases/knowledge-upload-session"
 import { KnowledgeUploadDialog } from "@/features/knowledge-bases/knowledge-upload-dialog"
 import {
   canCancelKnowledgeDocument,
@@ -317,13 +315,20 @@ function KnowledgeBaseLibraryContent() {
   }
   const [createOpen, setCreateOpen] = useState(false)
   const deferredSearch = useDeferredValue(search.trim())
-  const query = useKnowledgeBaseList({
-    lifecycle,
-    scope,
-    search: deferredSearch,
-  })
   const searchCapability = useKnowledgeSearchCapability()
-  const creationCapability = useKnowledgeBaseCreationCapability()
+  const knowledgeInstalled =
+    searchCapability.data !== undefined &&
+    searchCapability.data.status !== "not_installed"
+  const query = useKnowledgeBaseList(
+    {
+      lifecycle,
+      scope,
+      search: deferredSearch,
+    },
+    { enabled: knowledgeInstalled }
+  )
+  const creationCapability =
+    useKnowledgeBaseCreationCapability(knowledgeInstalled)
   const creationReady =
     creationCapability.capability?.status === "ready" &&
     !creationCapability.isFetching &&
@@ -346,17 +351,27 @@ function KnowledgeBaseLibraryContent() {
     { value: "shared" as const, label: t("knowledge.scope.shared") },
   ]
 
-  const content = (
-    <KnowledgeBaseListContent
-      items={items}
-      loading={query.isLoading}
-      error={query.error}
-      hasNextPage={query.hasNextPage}
-      fetchingNextPage={query.isFetchingNextPage}
-      onRetry={() => void query.refetch()}
-      onLoadMore={() => void query.fetchNextPage()}
-    />
-  )
+  const content =
+    !searchCapability.data && searchCapability.isError ? (
+      <ErrorState
+        message={getErrorMessage(searchCapability.error, t)}
+        onRetry={() => void searchCapability.refetch()}
+      />
+    ) : (
+      <KnowledgeBaseListContent
+        items={items}
+        loading={searchCapability.isPending || query.isLoading}
+        error={query.error}
+        hasNextPage={query.hasNextPage}
+        fetchingNextPage={query.isFetchingNextPage}
+        onRetry={() => void query.refetch()}
+        onLoadMore={() => void query.fetchNextPage()}
+      />
+    )
+
+  if (searchCapability.data?.status === "not_installed") {
+    return <KnowledgeSearchStatusBanner capability={searchCapability.data} />
+  }
 
   return (
     <>
@@ -738,6 +753,7 @@ function CreateKnowledgeBaseDialog({
             <FieldShell
               id="knowledge-base-source-type"
               label={t("knowledge.create.sourceType")}
+              required
             >
               <ToggleGroup
                 id="knowledge-base-source-type"
@@ -750,7 +766,7 @@ function CreateKnowledgeBaseDialog({
                 }}
                 variant="outline"
                 aria-label={t("knowledge.create.sourceType")}
-                className="grid w-full grid-cols-1 gap-3 sm:grid-cols-2"
+                className="grid w-full auto-rows-fr grid-cols-1 items-stretch gap-3 sm:grid-cols-2"
               >
                 {sourceTypeItems.map((item) => {
                   const SourceIcon = item.icon
@@ -794,11 +810,13 @@ function CreateKnowledgeBaseDialog({
           <FieldShell
             id="knowledge-base-name"
             label={t("knowledge.create.name")}
+            required
             error={nameError}
           >
             <InputGroup>
               <InputGroupInput
                 id="knowledge-base-name"
+                aria-required="true"
                 value={name}
                 maxLength={160}
                 autoFocus={shouldAutoFocusOnDesktop()}
@@ -817,11 +835,13 @@ function CreateKnowledgeBaseDialog({
               <FieldShell
                 id="knowledge-base-sharepoint-url"
                 label={t("knowledge.create.sharePointUrl")}
+                required
                 hint={t("knowledge.create.sharePointUrlHint")}
               >
                 <InputGroup>
                   <InputGroupInput
                     id="knowledge-base-sharepoint-url"
+                    aria-required="true"
                     type="url"
                     value={sharePointUrl}
                     placeholder={t("knowledge.create.sharePointUrlPlaceholder")}
@@ -931,10 +951,12 @@ function EditKnowledgeBaseDialog({
           <FieldShell
             id="knowledge-base-edit-name"
             label={t("knowledge.create.name")}
+            required
           >
             <InputGroup>
               <InputGroupInput
                 id="knowledge-base-edit-name"
+                aria-required="true"
                 value={name}
                 maxLength={160}
                 autoFocus={shouldAutoFocusOnDesktop()}
@@ -1141,8 +1163,7 @@ function KnowledgeBaseDetailContent({
     [entriesQuery.data]
   )
   const [uploadOpen, setUploadOpen] = useState(false)
-  const [uploadBatchStatus, setUploadBatchStatus] =
-    useState<KnowledgeUploadBatchStatus | null>(null)
+  const uploadBatchStatus = useKnowledgeUploadBatchStatus(knowledgeBaseId ?? "")
   const [shareOpen, setShareOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
   const [renameDocumentTarget, setRenameDocumentTarget] =
@@ -1471,7 +1492,6 @@ function KnowledgeBaseDetailContent({
         knowledgeBaseId={knowledgeBase.id}
         documents={documents}
         onUploaded={invalidate}
-        onBatchStatusChange={setUploadBatchStatus}
         onLocateDocument={(documentId) => {
           window.document
             .getElementById(`knowledge-document-${documentId}`)
@@ -2591,10 +2611,12 @@ function RenameKnowledgeDocumentDialog({
         <FieldShell
           id="knowledge-document-display-name"
           label={t("knowledge.document.displayName")}
+          required
         >
           <InputGroup>
             <InputGroupInput
               id="knowledge-document-display-name"
+              aria-required="true"
               value={displayName}
               maxLength={260}
               autoFocus={shouldAutoFocusOnDesktop()}
